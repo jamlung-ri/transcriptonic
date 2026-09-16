@@ -65,3 +65,10 @@ export const PLATFORM_CONFIGS = {
 export const ALARM_NAME = "dailyPermissionCheck"
 export const INTERVAL_IN_MINUTES = 24 * 60 // 24 hours
 
+// Periodically writes the in-progress transcript to a file while a meeting is
+// still running, so external tools can tail it live instead of waiting for
+// the end-of-meeting download. 1 minute is the minimum period Chrome allows
+// for repeating alarms.
+export const LIVE_BACKUP_ALARM_NAME = "liveTranscriptBackup"
+export const LIVE_BACKUP_INTERVAL_MINUTES = 1
+

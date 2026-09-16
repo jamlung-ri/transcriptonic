@@ -1,5 +1,91 @@
 import { getTranscriptString, getChatMessagesString } from './utils.js'
-import { TIMEFORMAT } from './config.js'
+import { TIMEFORMAT, LIVE_BACKUP_ALARM_NAME } from './config.js'
+
+// Same invalid-filename regex used in downloadTranscript, kept in sync manually
+// since it's simple and duplicating it avoids exporting an internal helper.
+const INVALID_FILENAME_REGEX = /[:?"*<>|~/\\\u{1}-\u{1f}\u{7f}\u{80}-\u{9f}\p{Cf}\p{Cn}]|^[.\u{0}\p{Zl}\p{Zp}\p{Zs}]|[.\u{0}\p{Zl}\p{Zp}\p{Zs}]$|^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?=\.|$)/gui
+
+/**
+ * @description Writes the transcript of the meeting currently in progress to a fixed
+ * filename, overwriting it each time. Called on a repeating alarm while a meeting is
+ * live, so a file on disk keeps growing throughout the meeting instead of only
+ * appearing once at the end. The filename is derived from meetingSoftware and
+ * meetingStartTimestamp only (not meetingTitle, which can change mid-meeting) so it
+ * stays stable for the whole meeting.
+ * @throws error codes: 017, 018
+ */
+export function exportLiveTranscript() {
+    return new Promise((resolve, reject) => {
+        chrome.storage.local.get([
+            "meetingSoftware",
+            "meetingTitle",
+            "meetingStartTimestamp",
+            "meetingTabId",
+            "transcript",
+            "chatMessages"
+        ], function (resultLocalUntyped) {
+            const resultLocal = /** @type {ResultLocal} */ (resultLocalUntyped)
+
+            // meetingTabId is only a real tab id while a meeting is actively being tracked
+            // (it's "processing" during end-of-meeting cleanup, then null afterward). If a
+            // crash skipped that cleanup and left the alarm running with no meeting active,
+            // stop rather than rewriting a stale file forever.
+            if (!resultLocal.meetingStartTimestamp || typeof resultLocal.meetingTabId !== "number") {
+                chrome.alarms.clear(LIVE_BACKUP_ALARM_NAME)
+                reject({ errorCode: "017", errorMessage: "No meeting in progress" })
+                return
+            }
+
+            if (!(resultLocal.transcript && resultLocal.transcript.length > 0)) {
+                // Nothing captured yet this tick, skip silently rather than writing an empty file
+                resolve("Nothing to back up yet")
+                return
+            }
+
+            const startTimestamp = new Date(resultLocal.meetingStartTimestamp)
+            const formattedStartTimestamp = startTimestamp.toLocaleString("default", TIMEFORMAT).replace(/[\/:]/g, "-")
+            const meetingSoftware = resultLocal.meetingSoftware || "Meeting"
+            const sanitisedMeetingSoftware = meetingSoftware.replaceAll(INVALID_FILENAME_REGEX, "_")
+
+            // Fixed per-meeting filename (no meetingTitle, so it can't drift mid-meeting)
+            const fileName = `TranscripTonic/Live/${sanitisedMeetingSoftware}-live-transcript-started-${formattedStartTimestamp}.txt`
+
+            let content = `LIVE TRANSCRIPT (in progress, last updated ${new Date().toLocaleString("default", TIMEFORMAT)})\n`
+            content += resultLocal.meetingTitle ? `Meeting: ${resultLocal.meetingTitle}\n\n` : "\n"
+            content += getTranscriptString(resultLocal.transcript)
+
+            if (resultLocal.chatMessages && resultLocal.chatMessages.length > 0) {
+                content += `\n---------------\nCHAT MESSAGES\n---------------\n\n`
+                content += getChatMessagesString(resultLocal.chatMessages)
+            }
+
+            const blob = new Blob([content], { type: "text/plain" })
+            const reader = new FileReader()
+            reader.readAsDataURL(blob)
+
+            reader.onload = function (event) {
+                if (event.target?.result) {
+                    const dataUrl = event.target.result
+
+                    chrome.downloads.download({
+                        // @ts-ignore
+                        url: dataUrl,
+                        filename: fileName,
+                        conflictAction: "overwrite"
+                    }).then(() => {
+                        resolve("Live transcript backed up")
+                    }).catch((err) => {
+                        console.error("Live transcript backup failed:", err)
+                        reject({ errorCode: "018", errorMessage: err })
+                    })
+                }
+                else {
+                    reject({ errorCode: "018", errorMessage: "Failed to read blob" })
+                }
+            }
+        })
+    })
+}
 
 /**
  * @param {number} index

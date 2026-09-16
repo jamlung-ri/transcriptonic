@@ -1,6 +1,6 @@
-import { ALARM_NAME } from "./config.js"
+import { ALARM_NAME, LIVE_BACKUP_ALARM_NAME, LIVE_BACKUP_INTERVAL_MINUTES } from "./config.js"
 import { processLastMeeting, recoverLastMeeting } from "./meetings.js"
-import { downloadTranscript, postTranscriptToWebhook } from "./exporters.js"
+import { downloadTranscript, postTranscriptToWebhook, exportLiveTranscript } from "./exporters.js"
 import {
     getPermissionStatus,
     requestPlatformPermission,
@@ -30,9 +30,17 @@ chrome.runtime.onMessage.addListener(function (messageUnTyped, sender, sendRespo
                 console.log("Meeting tab id saved")
             })
         })
+
+        // Start writing the live transcript to a file on a repeating alarm, so it's
+        // readable throughout the meeting instead of only after it ends
+        chrome.alarms.create(LIVE_BACKUP_ALARM_NAME, { periodInMinutes: LIVE_BACKUP_INTERVAL_MINUTES })
+        console.log(`Live backup alarm started (every ${LIVE_BACKUP_INTERVAL_MINUTES} min)`)
     }
 
     if (message.type === "meeting_ended") {
+        // Stop the live backup alarm; the final file is about to be written by processLastMeeting()
+        chrome.alarms.clear(LIVE_BACKUP_ALARM_NAME)
+
         // Prevents double downloading of transcript from tab closed event listener. Also prevents available update from being applied, during meeting post processing.
         chrome.storage.local.set({ meetingTabId: "processing" }, function () {
             console.log("Meeting tab id set to processing meeting")
@@ -278,6 +286,10 @@ chrome.tabs.onRemoved.addListener(function (tabId) {
         if (tabId === resultLocal.meetingTabId) {
             console.log("Successfully intercepted tab close")
 
+            // Stop the live backup alarm here too, in case the meeting ended by closing
+            // the tab rather than the in-page "meeting ended" detection firing first
+            chrome.alarms.clear(LIVE_BACKUP_ALARM_NAME)
+
             // Prevent misfires of onRemoved until next meeting. Also prevents available update from being applied, during meeting post processing.
             chrome.storage.local.set({ meetingTabId: "processing" }, function () {
                 console.log("Meeting tab id set to processing meeting")
@@ -361,5 +373,11 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     if (alarm.name === ALARM_NAME) {
         console.log("Alarm triggered: Running daily check...")
         // checkPermissionsAndOpenMeetingsPage()
+    }
+
+    if (alarm.name === LIVE_BACKUP_ALARM_NAME) {
+        exportLiveTranscript()
+            .then((message) => console.log(message))
+            .catch((error) => console.error("Live transcript backup failed:", error))
     }
 })
